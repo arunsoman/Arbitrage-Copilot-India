@@ -1,0 +1,318 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Users & Settings ────────────────────────────────────────────────────────
+
+model User {
+  id                  String   @id @default(cuid())
+  name                String
+  email               String   @unique
+  role                String   @default("seller") // seller | admin | supplier
+  passwordHash        String?  // scrypt hash; demo users seeded with known passwords
+  avatarColor         String   @default("amber") // amber | emerald | violet
+  gstin               String?
+  businessName        String?
+  state               String?
+  minRoi              Float    @default(25) // percent
+  maxBuyPrice         Float    @default(500) // INR per unit incl GST
+  minProfit           Float    @default(150) // INR per unit after all fees
+  gstRateDefault      Float    @default(18) // percent
+  riskTolerance       String   @default("balanced") // conservative | balanced | aggressive
+  preferredCategories String   @default("[]") // JSON array of category names
+  amazonConnected     Boolean  @default(false)
+  amazonConnectedAt   DateTime?
+  onboardingDone      Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  supplierProfile     SupplierProfile?
+  fbaShipments        FbaShipment[]
+}
+
+// ─── Supplier (IndiaMART seller side) portal profile ────────────────────────
+
+model SupplierProfile {
+  id             String  @id @default(cuid())
+  userId         String  @unique
+  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyName    String
+  gstin          String?
+  contactPhone   String?
+  addressLine    String?
+  city           String?
+  state          String?
+  pincode        String?
+  // Shiprocket pickup_location name registered for this supplier
+  pickupLocationName String @default("PRIMARY")
+  prepCapabilities   String @default("[]") // JSON array e.g. ["fnsku_labelling","bubble_wrap","boxing"]
+  // CRM push integration: the supplier's own CRM receives signed webhooks for
+  // consignment events so they don't need to log into this platform.
+  crmWebhookUrl   String?   // e.g. https://supplier-crm.example.com/hooks/arcop
+  crmApiToken     String?   // shared secret used to HMAC-sign webhook payloads
+  crmLastNotifiedAt DateTime?
+  crmLastStatus   String?   // delivered | failed | skipped
+}
+
+// ─── Amazon Fulfillment Centers (FBA inbound destinations) ───────────────────
+
+model FbaWarehouse {
+  id        String @id @default(cuid())
+  code      String @unique // e.g. BLR7, BOM5, HYD8, DEL4
+  name      String
+  state     String
+  city      String
+  pincode   String
+  address   String
+  acceptsPt Boolean @default(true)
+  acceptsFt Boolean @default(true)
+}
+
+// ─── Shiprocket Cargo: B2B / FBA inbound shipments ───────────────────────────
+
+model FbaShipment {
+  id              String   @id @default(cuid())
+  ownerId         String   // arbitrager (seller) user id
+  owner           User     @relation(fields: [ownerId], references: [id])
+  supplierUserId  String?  // linked supplier portal user, if matched
+  supplierName    String
+  pickupAddressJson String @default("{}")  // full Shiprocket pickup_location payload
+  destinationJson String   @default("{}")   // Amazon FC address payload
+  destinationCode String?
+  mode            String   @default("PTL") // PTL | FTL
+  // Contents snapshot
+  itemsJson       String   @default("[]")  // [{buyListItemId,title,sku,qty,unitPrice,weightGrams}]
+  totalWeightKg   Float    @default(0)
+  declaredValue   Float    @default(0)
+  freightQuoted   Float?   // INR from rate card
+  freightPerKg    Float?
+  etaDays         Int?
+  // Shiprocket references
+  provider        String   @default("shiprocket") // shiprocket | demo
+  shiprocketOrderId  String?
+  shiprocketShipmentId String?
+  awb             String?
+  courierName     String?
+  labelUrl        String?
+  manifestUrl     String?
+  pickupToken     String?
+  pickupScheduledFor DateTime?
+  trackingJson    String   @default("[]") // latest scan checkpoints
+  // Lifecycle: draft → quoted → booked → awb_assigned → ready_for_pickup → pickup_scheduled → in_transit → delivered | cancelled
+  status          String   @default("draft")
+  statusHistoryJson String @default("[]") // [{status, at, by, note}]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model SystemConfig {
+  key       String   @id
+  value     String // JSON string
+  updatedAt DateTime @updatedAt
+}
+
+// ─── Outbound CRM webhooks (supplier integration) ───────────────────────────
+
+model CrmNotificationLog {
+  id              String   @id @default(cuid())
+  shipmentId      String
+  supplierUserId  String?
+  event           String // consignment_booked | pickup_scheduled | cancelled | in_transit | delivered
+  url             String?
+  status          String // delivered | failed | skipped | simulated
+  httpStatus      Int?
+  attempts        Int      @default(0)
+  payloadJson     String   @default("{}")
+  responseSnippet String?
+  createdAt       DateTime @default(now())
+}
+
+// ─── Search analytics (admin report: what is being queried) ──────────────────
+
+model SearchLog {
+  id          String   @id @default(cuid())
+  userId      String?
+  query       String
+  resultCount Int      @default(0)
+  provider    String   @default("apify-mock")
+  createdAt   DateTime @default(now())
+}
+
+// ─── IndiaMART Pipeline (via Apify provider) ─────────────────────────────────
+
+model IndiaMartProduct {
+  id               String   @id @default(cuid())
+  searchQuery      String
+  productName      String
+  productUrl       String?
+  priceInr         Float
+  unit             String   @default("Piece")
+  moq              Int?
+  supplierName     String
+  supplierUrl      String?
+  location         String?
+  supplierRating   Float?
+  supplierType     String? // Manufacturer / Trader / Distributor
+  natureOfBusiness String?
+  yearsInBusiness  Int?
+  gstVerified      Boolean  @default(false)
+  trustSeal        Boolean  @default(false)
+  rawJson          String   @default("{}") // full provider payload snapshot
+  provider         String   @default("apify-mock")
+  fetchedAt        DateTime @default(now())
+
+  extracted ExtractedProduct[]
+}
+
+model ExtractedProduct {
+  id                 String   @id @default(cuid())
+  indiaMartProductId String   @unique
+  indiaMartProduct   IndiaMartProduct @relation(fields: [indiaMartProductId], references: [id], onDelete: Cascade)
+  supplierSku        String?
+  title              String
+  brand              String?
+  category           String?
+  mrp                Float?
+  purchasePrice      Float
+  gstRate            Float    @default(18)
+  moq                Int?
+  packQuantity       Int      @default(1)
+  weightGrams        Float?
+  attributesJson     String   @default("{}")
+  imagesJson         String   @default("[]")
+  // Legal Metrology mandatory declarations
+  manufacturerName   String?
+  countryOfOrigin    String?
+  netQuantity        String?
+  customerCare       String?
+  monthYearMfg       String?
+  extractionMethod   String   @default("heuristic") // llm | heuristic
+  confidenceScore    Float    @default(0.5)
+  reviewStatus       String   @default("pending") // pending | auto_ok | flagged | confirmed
+  createdAt          DateTime @default(now())
+
+  matches     AmazonMatch[]
+  dealAnalyses DealAnalysis[]
+}
+
+// ─── Amazon ASIN Matching ────────────────────────────────────────────────────
+
+model AmazonCatalog {
+  id            String  @id @default(cuid())
+  asin          String  @unique
+  title         String
+  brand         String?
+  category      String
+  price         Float
+  referralPct   Float   @default(9)
+  weightGrams   Float?
+  attributesJson String @default("{}")
+  keywords      String  @default("")
+  imageHint     String?
+}
+
+model AmazonMatch {
+  id                 String   @id @default(cuid())
+  extractedProductId String
+  extractedProduct   ExtractedProduct @relation(fields: [extractedProductId], references: [id], onDelete: Cascade)
+  asin               String
+  productTitle       String
+  matchType          String // exact | variant | similar | no_match
+  confidenceScore    Float
+  reasonJson         String   @default("{}")
+  cascadeTraceJson   String   @default("[]")
+  needsReview        Boolean  @default(false)
+  verifiedByUser     String? // approved | rejected
+  createdAt          DateTime @default(now())
+
+  dealAnalyses DealAnalysis[]
+}
+
+// ─── Deal Analysis (deterministic engine + LLM explanation) ─────────────────
+
+model DealAnalysis {
+  id                  String   @id @default(cuid())
+  extractedProductId  String
+  extractedProduct    ExtractedProduct @relation(fields: [extractedProductId], references: [id], onDelete: Cascade)
+  amazonMatchId       String?
+  amazonMatch         AmazonMatch? @relation(fields: [amazonMatchId], references: [id])
+  // deterministic fee engine outputs (all INR)
+  supplierCost        Float
+  gstAmount           Float
+  inboundShippingCost Float
+  packagingCost       Float
+  totalCost           Float
+  amazonPrice         Float
+  referralFee         Float
+  closingFee          Float
+  fbaFulfillmentFee   Float
+  netPayout           Float
+  netProfit           Float
+  roi                 Float
+  maxBuyPrice         Float
+  verdict             String // strong_buy | watch | avoid | needs_review
+  verdictReasonsJson  String   @default("[]")
+  riskSummary         String?
+  competitionSellers  Int      @default(0)
+  priceTrend30d       Float    @default(0) // % change over 30 days
+  priceCutters7d      Int      @default(0)
+  explanation         String?
+  explanationSource   String   @default("template") // llm | template
+  confidenceScore     Float    @default(0.5)
+  toolTraceJson       String   @default("[]")
+  createdAt           DateTime @default(now())
+
+  listingDrafts ListingDraft[]
+  buyListItems  BuyListItem[]
+}
+
+// ─── Listing Drafts (gated, human-reviewed) ──────────────────────────────────
+
+model ListingDraft {
+  id                    String   @id @default(cuid())
+  dealAnalysisId        String
+  dealAnalysis          DealAnalysis @relation(fields: [dealAnalysisId], references: [id], onDelete: Cascade)
+  title                 String
+  bulletsJson           String   @default("[]")
+  description           String   @default("")
+  backendKeywords       String   @default("")
+  complianceStatusJson  String   @default("{}")
+  generationSource      String   @default("template") // llm | template
+  humanReviewed         Boolean  @default(false)
+  published             Boolean  @default(false) // must stay false in MVP (no auto-publish)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+// ─── Buy List / Action Plan ──────────────────────────────────────────────────
+
+model BuyListItem {
+  id              String   @id @default(cuid())
+  dealAnalysisId  String
+  dealAnalysis    DealAnalysis @relation(fields: [dealAnalysisId], references: [id], onDelete: Cascade)
+  quantity        Int      @default(1)
+  status          String   @default("planned") // planned | quoted | negotiated | ordered | received
+  notes           String?
+  createdAt       DateTime @default(now())
+}
+
+// ─── LLM Audit Log (Trust & Safety) ──────────────────────────────────────────
+
+model LLMAuditLog {
+  id              String   @id @default(cuid())
+  userId          String?
+  action          String // asin_match | deal_explanation | listing_draft | catalog_extraction
+  modelVersion    String
+  promptVersion   String
+  inputSnapshot   String   @default("{}")
+  outputJson      String   @default("{}")
+  confidenceScore Float?
+  latencyMs       Int?
+  fallbackUsed    Boolean  @default(false)
+  createdAt       DateTime @default(now())
+}
